@@ -1,203 +1,318 @@
 import asyncio
 import aiohttp
 import pandas as pd
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 import logging
 import time
+from functools import wraps
+# pip install async-retrying (실제 사용 시 필요)
+# from async_retrying import retry  # 실제 환경에서는 pip install async-retrying 필요
+# pip install pydantic (실제 사용 시 필요)
+# from pydantic import BaseModel, Field, ValidationError
 
-# 로깅 설정: 실제 서비스 환경에서 디버깅 및 모니터링에 필수적입니다.
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# 로깅 설정: 엔터프라이즈 환경에 적합한 상세 로깅 구성
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        # logging.FileHandler("pipeline.log") # 실제 서비스 환경에서는 파일 또는 로깅 시스템 연동
+    ]
+)
+logger = logging.getLogger(__name__)
 
-class AdvancedDataProcessor:
+# --- 설정 관리 (실제 프로젝트에서는 별도의 config.py 또는 환경 변수 활용) ---
+class AppConfig:
+    API_BASE_URL: str = "https://jsonplaceholder.typicode.com"
+    REQUEST_TIMEOUT: int = 15
+    RETRY_ATTEMPTS: int = 3
+    RETRY_FACTOR: float = 0.5  # 지수 백오프를 위한 기본 지연 시간 (0.5s, 1s, 2s ...)
+    MAX_CONCURRENT_REQUESTS: int = 10 # 동시 요청 제한
+
+# --- 재시도 데코레이터 (async-retrying 라이브러리 가정) ---
+# 실제 사용 시, pip install async-retrying 필요. 없으면 간단한 자체 구현으로 대체
+def async_retry(attempts: int = AppConfig.RETRY_ATTEMPTS, factor: float = AppConfig.RETRY_FACTOR):
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            for i in range(attempts):
+                try:
+                    return await func(*args, **kwargs)
+                except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                    if i < attempts - 1:
+                        delay = factor * (2 ** i) # 지수 백오프
+                        logger.warning(f"재시도 ({i+1}/{attempts}) - {func.__name__} 실패: {e}. {delay:.2f}초 후 재시도...")
+                        await asyncio.sleep(delay)
+                    else:
+                        logger.error(f"최대 재시도 횟수 초과 - {func.__name__} 최종 실패: {e}")
+                        raise # 최종 실패 시 예외 다시 발생
+        return wrapper
+    return decorator
+
+# --- 데이터 모델 (pydantic 사용 예시 - 실제 사용 시 pip install pydantic 필요) ---
+# class User(BaseModel):
+#     id: int
+#     name: str
+#     email: str = Field(..., pattern=r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+#     username: str
+#     phone: Optional[str] = None
+#     website: Optional[str] = None
+
+# class Post(BaseModel):
+#     userId: int
+#     id: int
+#     title: str
+#     body: str
+
+class ExternalAPIService:
     """
-    고성능 데이터 처리 및 분석을 위한 클래스입니다.
-    비동기 웹 요청, 데이터 전처리, 복잡한 분석 로직을 포함합니다.
+    외부 API와의 통신을 담당하는 서비스 계층입니다.
+    비동기 요청, 재시도 로직, 동시성 제어를 관리합니다.
     """
-    def __init__(self, api_base_url: str, request_timeout: int = 10):
-        self.api_base_url = api_base_url
-        self.request_timeout = request_timeout
-        # aiohttp.ClientSession은 비동기 HTTP 요청을 위한 세션을 관리합니다.
-        # 연결 풀링 등을 통해 성능을 최적화합니다.
-        self.session = aiohttp.ClientSession()
+    def __init__(self, session: aiohttp.ClientSession):
+        self._session = session
+        self._semaphore = asyncio.Semaphore(AppConfig.MAX_CONCURRENT_REQUESTS) # 동시 요청 제한 세마포어
 
-    async def _fetch_data_from_api(self, endpoint: str, params: Dict[str, Any] = None) -> Dict[str, Any]:
+    @async_retry(attempts=AppConfig.RETRY_ATTEMPTS)
+    async def fetch_data(self, endpoint: str, params: Dict[str, Any] = None) -> Dict[str, Any]:
         """
-        주어진 API 엔드포인트에서 비동기적으로 데이터를 가져옵니다.
-        네트워크 지연을 시뮬레이션하고, 견고한 오류 처리를 보여줍니다.
+        주어진 API 엔드포인트에서 데이터를 비동기적으로 가져옵니다.
+        재시도 로직과 동시성 제어를 포함합니다.
         """
-        url = f"{self.api_base_url}/{endpoint}"
-        try:
-            async with self.session.get(url, params=params, timeout=self.request_timeout) as response:
-                response.raise_for_status()  # 200번대 응답이 아니면 예외 발생
-                data = await response.json()
-                logging.info(f"데이터를 성공적으로 가져옴: {endpoint}")
-                await asyncio.sleep(0.1)  # 네트워크 지연 시뮬레이션
-                return data
-        except aiohttp.ClientError as e:
-            logging.error(f"API 요청 실패 ({endpoint}): {e}")
-            return {"error": str(e)}
-        except asyncio.TimeoutError:
-            logging.error(f"API 요청 시간 초과 ({endpoint})")
-            return {"error": "Request timed out"}
+        url = f"{AppConfig.API_BASE_URL}/{endpoint}"
+        async with self._semaphore: # 동시 요청 제한 적용
+            try:
+                # with aiohttp.Timeout(AppConfig.REQUEST_TIMEOUT): # aiohttp 3.x 이전 버전
+                async with self._session.get(url, params=params, timeout=AppConfig.REQUEST_TIMEOUT) as response:
+                    response.raise_for_status() # HTTP 4xx/5xx 에러 발생 시 예외
+                    data = await response.json()
+                    logger.info(f"데이터 성공적으로 가져옴: {endpoint}")
+                    return data
+            except aiohttp.ClientConnectorError as e:
+                logger.error(f"네트워크 연결 오류 발생 ({endpoint}): {e}")
+                raise # 네트워크 연결 오류는 재시도 후에도 치명적일 수 있음
+            except aiohttp.ClientResponseError as e:
+                logger.error(f"API 응답 오류 ({endpoint}): {e.status} - {e.message}")
+                raise
+            except asyncio.TimeoutError:
+                logger.error(f"API 요청 시간 초과 ({endpoint})")
+                raise
+            except Exception as e:
+                logger.error(f"예기치 않은 오류 발생 ({endpoint}): {e}")
+                raise
 
-    async def fetch_multiple_datasets(self, endpoints_with_params: List[Tuple[str, Dict[str, Any]]]) -> Dict[str, List[Dict[str, Any]]]:
-        """
-        여러 API 엔드포인트에서 동시에 데이터를 가져옵니다.
-        asyncio.gather를 사용하여 비동기 동시성을 극대화합니다.
-        """
-        tasks = []
-        for endpoint, params in endpoints_with_params:
-            tasks.append(self._fetch_data_from_api(endpoint, params))
-        
-        results = await asyncio.gather(*tasks, return_exceptions=True) # return_exceptions=True로 개별 실패에도 전체 작동 유지
-        
-        collected_data = {}
-        for i, (endpoint, _) in enumerate(endpoints_with_params):
-            if isinstance(results[i], dict) and "error" not in results[i]:
-                collected_data[endpoint.split('/')[-1]] = results[i] # endpoint의 마지막 부분 (예: 'users')을 키로 사용
-            else:
-                logging.warning(f"엔드포인트 '{endpoint}' 데이터 가져오기 실패 또는 오류: {results[i]}")
-                collected_data[endpoint.split('/')[-1]] = [] # 실패 시 빈 리스트 반환 또는 적절한 기본값
-        return collected_data
+class DataTransformer:
+    """
+    원시 데이터를 전처리하고 Pandas DataFrame으로 변환하는 책임을 가집니다.
+    데이터 무결성 검사 및 정제 로직을 포함합니다.
+    """
+    def __init__(self):
+        pass
 
-    def preprocess_data(self, raw_data: Dict[str, List[Dict[str, Any]]]) -> pd.DataFrame:
+    def preprocess(self, raw_data: Dict[str, List[Dict[str, Any]]]) -> pd.DataFrame:
         """
         가져온 원시 데이터를 Pandas DataFrame으로 변환하고 전처리합니다.
-        결측치 처리, 데이터 타입 변환 등 실용적인 데이터 전처리 로직을 포함합니다.
+        데이터 유효성 검사 및 통합 로직을 포함합니다.
         """
-        processed_dfs = []
+        processed_dfs = {}
         for key, data_list in raw_data.items():
-            if data_list: # 데이터가 있을 경우에만 처리
-                try:
-                    df = pd.DataFrame(data_list)
-                    # 예시: 'id' 컬럼이 있으면 인덱스로 설정
-                    if 'id' in df.columns:
-                        df = df.set_index('id')
-                    # 예시: 문자열 'created_at'을 datetime으로 변환 (오류 무시)
-                    if 'created_at' in df.columns:
-                        df['created_at'] = pd.to_datetime(df['created_at'], errors='coerce')
-                    # 예시: 수치형 컬럼의 결측치를 0으로 채우기
-                    for col in ['views', 'likes']: # 가상의 수치형 컬럼
-                        if col in df.columns:
-                            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-                    processed_dfs.append(df.add_prefix(f'{key}_')) # 컬럼명 충돌 방지를 위해 접두사 추가
-                    logging.info(f"'{key}' 데이터 전처리 완료.")
-                except Exception as e:
-                    logging.error(f"'{key}' 데이터 전처리 중 오류 발생: {e}")
-            else:
-                logging.warning(f"'{key}' 데이터가 없어 전처리를 건너뜁니다.")
+            if not data_list:
+                logger.warning(f"'{key}' 데이터가 비어있어 전처리를 건너뜁니다.")
+                continue
+
+            try:
+                # 옵션: Pydantic 모델을 통한 데이터 유효성 검사 및 정제 (주석 처리됨)
+                # if key == 'users':
+                #     validated_data = [User(**item).model_dump() for item in data_list]
+                # elif key == 'posts':
+                #     validated_data = [Post(**item).model_dump() for item in data_list]
+                # else:
+                #     validated_data = data_list
+                # df = pd.DataFrame(validated_data)
+                
+                df = pd.DataFrame(data_list)
+                
+                # 공통 전처리 로직 (예: ID 컬럼 인덱싱)
+                if 'id' in df.columns:
+                    df = df.set_index('id', drop=False) # id 컬럼을 인덱스로 두되, 컬럼에도 유지
+                
+                # 엔드포인트별 특정 전처리 (예: 날짜 형식 변환)
+                if key == 'posts' and 'created_at' in df.columns: # 가상 컬럼
+                    df['created_at'] = pd.to_datetime(df['created_at'], errors='coerce')
+                
+                # 컬럼명 충돌 방지를 위한 접두사 추가
+                df = df.add_prefix(f'{key}_')
+                processed_dfs[key] = df
+                logger.info(f"'{key}' 데이터 전처리 완료. Shape: {df.shape}")
+
+            # except ValidationError as e: # Pydantic 사용 시
+            #     logger.error(f"'{key}' 데이터 유효성 검사 실패: {e}")
+            except Exception as e:
+                logger.error(f"'{key}' 데이터 전처리 중 예외 발생: {e}", exc_info=True) # exc_info로 스택 트레이스 출력
         
         if not processed_dfs:
-            logging.warning("처리할 데이터프레임이 없습니다. 빈 데이터프레임을 반환합니다.")
+            logger.warning("처리할 유효한 데이터프레임이 없어 빈 DataFrame을 반환합니다.")
             return pd.DataFrame()
+
+        # 데이터프레임 병합 전략: 공통 키를 기준으로 외부 조인
+        # 실제 시나리오에서는 각 데이터셋 간의 관계를 정의하고 적절한 Join 전략 (inner, left, outer) 사용
+        # 예시: users와 posts를 userId 기준으로 병합
+        final_df = None
+        if 'users' in processed_dfs:
+            final_df = processed_dfs['users']
         
-        # 여러 데이터프레임을 병합 (공통 컬럼 또는 인덱스를 기준으로)
-        # 실제 시나리오에서는 적절한 merge/join 전략이 필요
-        try:
-            # 예시: 모든 데이터프레임을 외부 조인 (인덱스 기준)
-            # 복잡도에 따라 더 정교한 병합 로직 필요
-            final_df = processed_dfs[0]
-            for i in range(1, len(processed_dfs)):
-                final_df = final_df.join(processed_dfs[i], how='outer')
-            logging.info("모든 데이터프레임 병합 완료.")
-            return final_df
-        except Exception as e:
-            logging.error(f"데이터프레임 병합 중 오류 발생: {e}")
-            # 병합 실패 시, 개별 처리된 데이터프레임 리스트 반환을 고려하거나 오류 처리
-            return pd.DataFrame() # 오류 발생 시 빈 DataFrame 반환
+        if 'posts' in processed_dfs:
+            if final_df is not None:
+                # 'users_id'와 'posts_userId'를 기준으로 병합 (컬럼명 조정 필요)
+                # left_on='users_id'와 right_on='posts_userId'로 join할 수 있도록 컬럼명 조정 예시
+                # 실제 데이터에서는 이 부분이 훨씬 복잡해질 수 있음.
+                # 여기서는 단순히 인덱스 기반으로 병합하여 컬럼명 충돌을 피하는 방법 사용
+                posts_df = processed_dfs['posts'].rename(columns={'posts_userId': 'users_id'}) # join을 위해 컬럼명 맞춤
+                final_df = pd.merge(final_df, posts_df, left_index=True, right_on='users_id', how='left', suffixes=('_user', '_post'))
+            else:
+                final_df = processed_dfs['posts']
+
+        if 'comments' in processed_dfs and final_df is not None:
+            comments_df = processed_dfs['comments'].rename(columns={'comments_postId': 'posts_id'}) # join을 위해 컬럼명 맞춤
+            final_df = pd.merge(final_df, comments_df, left_index=True, right_on='posts_id', how='left', suffixes=('_base', '_comment'))
+
+        if final_df is None:
+            logger.warning("모든 데이터프레임 병합 실패. 개별 처리된 데이터프레임 중 첫 번째를 반환합니다.")
+            return next(iter(processed_dfs.values())) if processed_dfs else pd.DataFrame()
+        
+        logger.info(f"모든 데이터프레임 병합 완료. 최종 Shape: {final_df.shape}")
+        return final_df
+
+class DataAnalyzer:
+    """
+    전처리된 DataFrame을 기반으로 복잡한 데이터 분석을 수행합니다.
+    비즈니스 인텔리전스 및 통찰력 도출을 위한 핵심 로직을 담당합니다.
+    """
+    def __init__(self):
+        pass
 
     def perform_advanced_analysis(self, df: pd.DataFrame) -> Dict[str, Any]:
         """
         전처리된 DataFrame을 기반으로 복잡한 데이터 분석을 수행합니다.
-        이는 통계 분석, 패턴 인식, 예측 모델링 등 실제 비즈니스 로직을 나타낼 수 있습니다.
+        도메인 특화된 지표 계산 및 패턴 인식 로직을 포함합니다.
         """
         if df.empty:
-            logging.warning("분석할 데이터가 없어 고급 분석을 수행할 수 없습니다.")
-            return {"message": "No data for analysis."}
+            logger.warning("분석할 데이터가 없습니다. 빈 분석 결과를 반환합니다.")
+            return {"status": "no_data_for_analysis"}
 
         analysis_results = {}
         
-        # 예시 1: 'users_age' 컬럼이 있다면 연령대별 통계 분석
-        if 'users_age' in df.columns:
-            age_bins = [0, 19, 29, 39, 49, 59, 100]
-            age_labels = ['<20', '20s', '30s', '40s', '50s', '60+']
-            df['users_age_group'] = pd.cut(df['users_age'], bins=age_bins, labels=age_labels, right=False)
-            analysis_results['age_group_distribution'] = df['users_age_group'].value_counts().to_dict()
-            logging.info("연령대별 분포 분석 완료.")
+        try:
+            # 예시 1: 사용자별 게시글 수 및 댓글 수 (병합된 데이터 기준)
+            if 'users_id' in df.columns and 'posts_id' in df.columns and 'comments_id' in df.columns:
+                # 각 사용자가 작성한 게시글 수
+                user_post_counts = df.groupby('users_id')['posts_id'].nunique().to_dict()
+                analysis_results['user_post_counts'] = user_post_counts
+                logger.info("사용자별 게시글 수 분석 완료.")
+                
+                # 각 사용자가 작성한 댓글 수 (여기서는 게시글에 달린 댓글을 사용자에 연결 - 복잡한 조인 필요)
+                # 좀 더 정확한 댓글-사용자 연결을 위해서는 원본 데이터 스키마 파악 필요.
+                # 현재는 단순히 병합된 DF에서 댓글이 달린 게시글의 작성자 기준으로 카운트 (간단화된 예시)
+                user_comment_counts = df.groupby('users_id')['comments_id'].nunique().to_dict()
+                analysis_results['user_comment_counts'] = user_comment_counts
+                logger.info("사용자별 댓글 수 분석 완료.")
             
-        # 예시 2: 'products_price' 와 'products_sales_volume' 간의 상관관계 분석 (가상의 컬럼)
-        if 'products_price' in df.columns and 'products_sales_volume' in df.columns:
-            try:
-                correlation = df['products_price'].corr(df['products_sales_volume'])
-                analysis_results['price_sales_correlation'] = correlation
-                logging.info(f"가격-판매량 상관관계 분석 완료: {correlation:.2f}")
-            except Exception as e:
-                logging.warning(f"가격-판매량 상관관계 분석 실패: {e}")
+            # 예시 2: 가장 활동적인 사용자 TOP 5 (게시글 + 댓글 합산)
+            if 'user_post_counts' in analysis_results and 'user_comment_counts' in analysis_results:
+                user_activity = {}
+                for user_id in set(analysis_results['user_post_counts'].keys()) | set(analysis_results['user_comment_counts'].keys()):
+                    total_activity = analysis_results['user_post_counts'].get(user_id, 0) + analysis_results['user_comment_counts'].get(user_id, 0)
+                    user_activity[user_id] = total_activity
+                
+                sorted_activity = sorted(user_activity.items(), key=lambda item: item[1], reverse=True)
+                analysis_results['top_5_active_users'] = sorted_activity[:5]
+                logger.info("가장 활동적인 사용자 TOP 5 분석 완료.")
+            
+            # 예시 3: 게시글 제목 길이 분포 (간단한 텍스트 분석)
+            if 'posts_title' in df.columns:
+                df['posts_title_length'] = df['posts_title'].astype(str).apply(len)
+                title_length_stats = df['posts_title_length'].describe().to_dict()
+                analysis_results['post_title_length_stats'] = title_length_stats
+                logger.info("게시글 제목 길이 분포 분석 완료.")
 
-        # 예시 3: 시간 기반 데이터 (가령 'created_at')에 대한 일별/주별 트렌드 분석
-        # 예시로 'users_created_at' 컬럼이 있다고 가정
-        if 'users_created_at' in df.columns:
-            df['users_created_date'] = df['users_created_at'].dt.date
-            daily_signups = df.groupby('users_created_date').size().to_dict()
-            analysis_results['daily_signups'] = {str(k): v for k, v in daily_signups.items()}
-            logging.info("일별 사용자 가입 트렌드 분석 완료.")
+        except Exception as e:
+            logger.error(f"고급 분석 중 오류 발생: {e}", exc_info=True)
+            analysis_results['error'] = str(e)
 
-        # 분석 결과를 JSON 형태로 반환하거나, 특정 형식으로 저장할 수 있습니다.
         return analysis_results
 
-    async def run_data_pipeline(self, endpoints_with_params: List[Tuple[str, Dict[str, Any]]]) -> Dict[str, Any]:
+class DataPipelineOrchestrator:
+    """
+    데이터 수집, 전처리, 분석의 전체 파이프라인을 오케스트레이션합니다.
+    서비스 간 의존성 주입 및 전체 흐름을 제어합니다.
+    """
+    def __init__(self, api_service: ExternalAPIService, transformer: DataTransformer, analyzer: DataAnalyzer):
+        self._api_service = api_service
+        self._transformer = transformer
+        self._analyzer = analyzer
+
+    async def run(self, endpoints_with_params: List[Tuple[str, Dict[str, Any]]]) -> Dict[str, Any]:
         """
-        데이터 수집, 전처리, 분석의 전체 파이프라인을 실행합니다.
-        비동기적으로 데이터를 가져오고, 동기적으로 Pandas를 이용한 분석을 수행합니다.
+        데이터 파이프라인의 전체 흐름을 실행하고 최종 분석 결과를 반환합니다.
         """
         start_time = time.time()
-        logging.info("데이터 파이프라인 시작...")
-
-        # 1. 데이터 수집 (비동기)
-        raw_data = await self.fetch_multiple_datasets(endpoints_with_params)
+        logger.info("--- 데이터 파이프라인 실행 시작 ---")
         
-        # 2. 데이터 전처리 (동기)
-        processed_df = self.preprocess_data(raw_data)
+        raw_data = {}
+        # 병렬 데이터 수집
+        tasks = [self._api_service.fetch_data(endpoint, params) for endpoint, params in endpoints_with_params]
+        results = await asyncio.gather(*tasks, return_exceptions=True) # return_exceptions=True로 개별 오류에도 전체 진행
         
-        # 3. 고급 분석 (동기)
-        analysis_results = self.perform_advanced_analysis(processed_df)
+        for i, (endpoint, _) in enumerate(endpoints_with_params):
+            base_key = endpoint.split('/')[-1]
+            if not isinstance(results[i], Exception): # 오류가 아닌 경우에만 저장
+                raw_data[base_key] = results[i]
+            else:
+                logger.error(f"엔드포인트 '{endpoint}' 데이터 수집 중 치명적 오류: {results[i]}")
+                raw_data[base_key] = [] # 오류 발생 시 빈 리스트로 처리하여 다음 단계 진행
 
-        await self.session.close() # 세션 명시적 종료
+        logger.info("1. 원시 데이터 수집 완료.")
+
+        # 데이터 전처리
+        processed_df = self._transformer.preprocess(raw_data)
+        logger.info("2. 데이터 전처리 완료.")
+
+        # 고급 분석
+        analysis_results = self._analyzer.perform_advanced_analysis(processed_df)
+        logger.info("3. 고급 분석 완료.")
+
         end_time = time.time()
-        logging.info(f"데이터 파이프라인 완료. 총 실행 시간: {end_time - start_time:.2f}초")
+        logger.info(f"--- 데이터 파이프라인 실행 완료. 총 소요 시간: {end_time - start_time:.2f}초 ---")
+        
         return analysis_results
 
-# --- 실행 예제 ---
+# --- 메인 실행 함수 ---
 async def main():
-    # 가상의 API 엔드포인트 URL
-    # 실제 환경에서는 모의 서버 (예: FastAPI, Flask)를 구축하여 테스트하거나, 공개 API를 활용할 수 있습니다.
-    MOCK_API_BASE_URL = "https://jsonplaceholder.typicode.com" # 공개 더미 API 사용
+    # aiohttp ClientSession은 애플리케이션 생명주기 동안 유지되어야 성능 이점이 극대화됩니다.
+    # context manager를 사용하여 세션이 자동으로 닫히도록 관리합니다.
+    async with aiohttp.ClientSession() as session:
+        api_service = ExternalAPIService(session)
+        data_transformer = DataTransformer()
+        data_analyzer = DataAnalyzer()
+        
+        orchestrator = DataPipelineOrchestrator(api_service, data_transformer, data_analyzer)
 
-    processor = AdvancedDataProcessor(MOCK_API_BASE_URL)
-
-    # 가져올 데이터셋과 각 데이터셋에 대한 매개변수
-    # users: 사용자 정보 (10명), posts: 게시글 정보 (10개)
-    # comments: 댓글 정보 (10개) -> comments 엔드포인트는 존재하지만, 예제에서는 posts의 id를 넘겨줄 수 있도록 수정
-    endpoints_to_fetch = [
-        ("users", {"_limit": 5}), # 사용자 데이터 5개만 가져오기
-        ("posts", {"_limit": 5}), # 게시글 데이터 5개만 가져오기
-        # 실제 데이터 조인 시나리오를 위해 post ID가 1인 댓글만 가져오기
-        ("comments", {"postId": 1, "_limit": 3}) 
-    ]
-    
-    # 파이프라인 실행
-    results = await processor.run_data_pipeline(endpoints_to_fetch)
-    
-    print("\n--- 최종 분석 결과 ---")
-    import json
-    print(json.dumps(results, indent=4, ensure_ascii=False))
-
-    # 추가적으로, DataFrame의 일부를 출력하여 처리 결과를 시각적으로 보여줄 수 있습니다.
-    # print("\n--- 전처리된 데이터프레임 샘플 (일부) ---")
-    # if not processor.preprocess_data(await processor.fetch_multiple_datasets(endpoints_to_fetch)).empty:
-    #     print(processor.preprocess_data(await processor.fetch_multiple_datasets(endpoints_to_fetch)).head())
-
+        endpoints_to_fetch = [
+            ("users", {"_limit": 5}),
+            ("posts", {"_limit": 5}),
+            ("comments", {"postId": 1, "_limit": 3}) # postId 1번에 대한 댓글
+        ]
+        
+        final_results = await orchestrator.run(endpoints_to_fetch)
+        
+        import json
+        logger.info("\n--- 최종 분석 결과 ---")
+        print(json.dumps(final_results, indent=4, ensure_ascii=False))
 
 if __name__ == "__main__":
-    # Python 3.7+에서 asyncio.run()을 사용하여 비동기 코드를 실행합니다.
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("파이프라인 실행이 사용자 요청으로 중단되었습니다.")
+    except Exception as e:
+        logger.critical(f"파이프라인 실행 중 치명적인 오류 발생: {e}", exc_info=True)

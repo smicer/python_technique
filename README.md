@@ -1,72 +1,139 @@
-# python_technique
+# 📦 async-etl-pipeline-template
 
+> 실전형 비동기 데이터 수집 · 전처리 · 분석 파이프라인 템플릿
 
-파이썬 개발 - 직접개발 (기술력 ,수준 예제),. 실제 작업 샘플은 B2B간 기밀유지에 따라 공개안합니다
+Python + aiohttp + pandas 기반으로 설계된, **재시도 로직/전처리/고급분석**까지 포함된 고성능 데이터 파이프라인 템플릿입니다. 
+FM 주석 스타일, 실제 서비스 확장을 고려한 구조, 테스트 가능한 아키텍처를 제공합니다.
 
+---
 
-🚀 17년차 파이썬 개발자의 고급 데이터 파이프라인 포트폴리오
-이 프로젝트는 17년 경력의 파이썬 개발자로서 제가 보유한 고성능 데이터 처리 및 분석 역량을 보여주기 위해 작성된 샘플 코드입니다. 단순히 기능 구현을 넘어, 복잡한 비즈니스 요구사항을 충족하고 프로덕션 환경에서 안정적으로 운영될 수 있는 견고하고 효율적인 시스템 설계 능력을 강조합니다.
+## 🚀 Features
 
-✨ 프로젝트 개요
-본 파이프라인은 다음과 같은 핵심 단계로 구성됩니다:
+- ✅ **비동기 외부 API 수집** (`aiohttp`, `asyncio.Semaphore`, `재시도 지수 백오프`)
+- ✅ **전처리 구조 분리** (`DataTransformer`)
+- ✅ **고급 분석 구조화** (`DataAnalyzer`)
+- ✅ **DI 기반 오케스트레이터 설계** (`DataPipelineOrchestrator`)
+- ✅ **실전 대응 로깅** (`logging`, `exc_info`, 사용자 정의 config)
+- ✅ **테스트/확장성을 고려한 구조**
 
-비동기 데이터 수집: asyncio와 aiohttp를 활용하여 여러 외부 API로부터 데이터를 병렬적이고 비동기적으로 수집합니다. 이를 통해 I/O 바운드 작업의 성능 병목 현상을 최소화하고, 대규모 데이터셋 처리 시 효율성을 극대화합니다.
+---
 
-지능형 데이터 전처리: pandas 라이브러리를 사용하여 수집된 원시 데이터를 정제하고 변환합니다. 결측치 처리, 데이터 타입 변환, 그리고 여러 데이터셋 간의 정교한 병합 로직을 포함하여 분석에 용이한 형태로 데이터를 준비합니다.
+## 🧱 Architecture
 
-심층 데이터 분석: 전처리된 데이터를 기반으로 복잡한 비즈니스 로직을 반영한 분석을 수행합니다. 통계 분석, 트렌드 파악 등 실제 의사결정에 필요한 유의미한 인사이트를 도출합니다.
+```plaintext
+main()
+  └─ aiohttp.ClientSession
+       └─ ExternalAPIService (API 호출)
+       └─ DataTransformer (전처리)
+       └─ DataAnalyzer (고급 분석)
+       └─ DataPipelineOrchestrator (전체 흐름)
+```
 
-🌟 주요 특징 및 강조 역량
-극대화된 성능 및 효율성: asyncio 기반의 비동기 프로그래밍을 통해 I/O 작업의 지연 시간을 최소화하고, 시스템 리소스 활용률을 최적화합니다. 이는 대용량 데이터 처리 및 실시간 응답이 요구되는 환경에서 저의 강점입니다.
+---
 
-견고한 오류 처리 및 안정성: try-except 블록과 세분화된 로깅 전략을 통해 네트워크 문제, API 응답 오류 등 예상치 못한 상황에 대한 안정적인 처리가 가능하도록 설계했습니다. 프로덕션 시스템의 고가용성 및 신뢰성을 보장합니다.
+## 📦 설치 방법
 
-유연한 확장성 및 모듈화: AdvancedDataProcessor 클래스는 객체 지향 설계 원칙에 따라 각 기능이 독립적으로 모듈화되어 있습니다. 이는 새로운 데이터 소스 추가나 분석 로직 변경 시에도 쉽게 확장하고 유지보수할 수 있도록 합니다.
+```bash
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+```
 
-데이터 핸들링 전문성 (Pandas): pandas를 이용한 능숙한 데이터 조작 및 변환 능력은 복잡한 데이터 구조를 효율적으로 다루고, 다양한 형태의 데이터를 분석에 적합한 형태로 가공하는 데이터 엔지니어링 역량을 보여줍니다.
+> ※ `async-retrying`, `aiohttp`, `pandas`는 필수
 
-클린 코드 및 가독성: 타입 힌트 (Type Hinting) 적용과 명확한 주석은 코드의 가독성을 높이고, 대규모 프로젝트에서 협업 효율성을 극대화하는 저의 코딩 철학을 반영합니다.
+---
 
-🛠️ 기술 스택
-Python 3.8+
+## ✅ 실행 예시
 
-asyncio: 비동기 I/O
+```bash
+python main.py
+```
 
-aiohttp: 비동기 HTTP 클라이언트
+```json
+{
+  "user_post_counts": {"1": 2, ...},
+  "top_5_active_users": [["1", 5], ...]
+}
+```
 
-pandas: 데이터 처리 및 분석
+---
 
-logging: 로깅
+## 🧪 테스트 (선택)
 
-🚀 실행 방법
-1. 환경 설정
-먼저 필요한 라이브러리들을 설치합니다:
+```bash
+pytest tests/
+```
 
-Bash
+---
 
-pip install aiohttp pandas
-2. 코드 실행
-프로젝트 루트 디렉토리에서 다음 명령어를 실행합니다:
+## 📁 파일 구조
 
-Bash
+```bash
+.
+├── main.py                     # entry point
+├── services/
+│   ├── api_service.py         # API 호출 전용 서비스
+│   ├── transformer.py         # 전처리 로직
+│   └── analyzer.py            # 분석 로직
+├── orchestrator.py            # 전체 파이프라인 조합
+├── config.py                  # 전역 설정값
+├── requirements.txt
+└── README.md
+```
 
-python advanced_data_pipeline.py
-스크립트가 실행되면 가상의 API (JSONPlaceholder)에서 데이터를 가져오고, 전처리 및 분석을 수행한 후 최종 결과를 콘솔에 출력합니다.
+---
 
-💡 추가 고려사항 및 향후 개선 방향
-17년간의 개발 경험을 바탕으로, 이 파이프라인은 실제 서비스 환경에서의 다양한 요구사항을 고려하여 설계되었습니다.
+## 📌 사용 예시 (공공데이터 수집, 로그 집계, 쇼츠 분석 등)
 
-데이터베이스 연동: 현재는 API를 통해 데이터를 수집하지만, PostgreSQL, MongoDB 등 다양한 데이터베이스 시스템과의 연동을 통해 데이터 수집 범위를 확장할 수 있습니다.
+- 공공 API 또는 외부 크롤링 기반 데이터 수집 → 병렬 처리
+- Pandas 기반 정형 분석 or 마케팅 리포트 자동화
+- 유튜브, 인스타 등 메타 데이터 수집 → 전처리 + 통계
 
-클라우드 서비스 통합: AWS Lambda, Google Cloud Functions와 같은 서버리스 환경에서 이 파이프라인을 실행하여 확장성 및 비용 효율성을 높일 수 있습니다.
+---
 
-성능 프로파일링 및 최적화: 대규모 데이터셋 처리 시 Bottleneck 구간을 식별하고, 비동기 풀 사이즈 조정, 데이터 전처리 로직 최적화 등을 통해 지속적인 성능 개선이 가능합니다.
+## 🧠 설계 컨셉 (Why 이 구조인가)
 
-테스트 자동화: pytest를 활용한 단위 테스트 및 통합 테스트를 추가하여 코드의 안정성과 신뢰성을 더욱 확보할 수 있습니다.
+- **SOLID 원칙 준수 (Single Responsibility 분리)**
+- **Retry / Timeout / 동시성 등 실전 인프라 대응 고려**
+- **주석은 'FM 스타일'로 설계 이유와 처리 흐름 설명**
+- **진입장벽 낮추되 확장성은 열려 있음 (testable)**
 
-📞 연락처
-더 자세한 정보나 협업 문의는 언제든지 연락 주십시오.
+---
 
-이메일: smicer.prederik@gmail.com
+## 🛠 requirements.txt 예시
 
-by K.H. CHOI
+```txt
+aiohttp
+pandas
+async-retrying
+pydantic  # (선택)
+pytest    # (테스트용)
+```
+
+---
+
+## 🧪 test 예시 코드
+
+```python
+# tests/test_api_mock.py
+import pytest
+from unittest.mock import AsyncMock
+
+@pytest.mark.asyncio
+async def test_fetch_data():
+    from services.api_service import ExternalAPIService
+    dummy_session = AsyncMock()
+    dummy_session.get.return_value.__aenter__.return_value.json = AsyncMock(return_value={"test": 1})
+
+    svc = ExternalAPIService(dummy_session)
+    data = await svc.fetch_data("test-endpoint")
+    assert data == {"test": 1}
+```
+
+---
+
+## ✍️ 저작권 / 라이선스
+Kyu Ho, CHOI
+email: smicer.prederik@gmail.com
+
+MIT License. 자유롭게 사용하시되, 출처 표시해주시면 감사합니다.
